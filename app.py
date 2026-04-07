@@ -14,12 +14,7 @@ Features:
 import streamlit as st
 import streamlit.components.v1 as components
 import math, os
-try:
-    import cv2
-except ImportError as e:
-    import streamlit as st
-    st.error(f'OpenCV import failed: {e}. Check requirements.txt and Python version.')
-    st.stop()
+import cv2
 import numpy as np
 import pandas as pd
 import folium
