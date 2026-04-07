@@ -7,7 +7,7 @@ Features:
   ✅ Bounding box records in DB
   ✅ Supabase cloud sync
   ✅ Live GPS + proximity alerts
-  ✅ Interactive pydeck map  ← extracted from file 2
+  ✅ Interactive Folium map
   ✅ Analytics dashboard
 """
 
@@ -22,7 +22,8 @@ except ImportError as e:
     st.stop()
 import numpy as np
 import pandas as pd
-import pydeck as pdk                          # ← from file 2 (replaces folium)
+import folium
+from streamlit_folium import st_folium
 from ultralytics import YOLO
 from PIL import Image
 from datetime import datetime
@@ -137,6 +138,7 @@ ALERT_RADIUS = 200
 
 SEVERITY_THRESHOLDS = {"LOW":(0,5000),"MEDIUM":(5000,20000),"HIGH":(20000,float("inf"))}
 SEVERITY_COLORS     = {"LOW":"#4ade80","MEDIUM":"#fbbf24","HIGH":"#f87171"}
+FOLIUM_COLORS       = {"LOW":"green","MEDIUM":"orange","HIGH":"red"}
 
 # ─── Detection helpers ────────────────────────────────────────────────────────
 def get_severity(area):
@@ -209,100 +211,57 @@ def nearby_potholes(ulat,ulon,rows,radius=ALERT_RADIUS):
         if d<=radius: out.append({**r,"distance_m":round(d)})
     return sorted(out,key=lambda x:x["distance_m"])
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MAP HELPER — extracted from file 2, adapted for file 1's data structure
-# ══════════════════════════════════════════════════════════════════════════════
-
 def build_map(rows, user_lat=None, user_lon=None, alert_radius=ALERT_RADIUS):
-    """
-    Build a pydeck map.
-    Extracted from file 2's Detect-mode map block and adapted to work with
-    file 1's DB row format  (rows have "latitude", "longitude", "severity").
-    Returns a pdk.Deck ready for st.pydeck_chart().
-    """
-
-    # Severity → RGB color  (same logic as file 2's color lists)
-    SEV_COLOR = {
-        "LOW":    [0,  255, 128],   # green  (file 2 used [0,255,0] for YOU)
-        "MEDIUM": [251, 191, 36],   # amber
-        "HIGH":   [255,  0,  0],    # red    (file 2 used [255,0,0] for POTHOLE)
-    }
-
-    map_data = []
-
-    # ── User location dot  (file 2: color=[0,255,0], radius=200, type="YOU") ──
+    if user_lat and user_lon: centre,zoom=[user_lat,user_lon],16
+    elif rows: centre,zoom=[[r["latitude"] for r in rows],[r["longitude"] for r in rows]],14;centre=[sum(c)/len(c) for c in [[r["latitude"] for r in rows],[r["longitude"] for r in rows]]]
+    else: centre,zoom=[20.5937,78.9629],5
+    m=folium.Map(location=centre,zoom_start=zoom,tiles="CartoDB dark_matter")
     if user_lat and user_lon:
-        map_data.append({
-            "lat":    user_lat,
-            "lon":    user_lon,
-            "color":  [0, 255, 0],   # green – matches file 2
-            "radius": 40,
-            "type":   "📍 YOU",
-        })
-
-    # ── Pothole dots  (file 2: color=[255,0,0], radius=80, type="POTHOLE") ──
+        folium.Marker(location=[user_lat,user_lon],tooltip="📍 You",
+            popup=folium.Popup(f"<b style='color:#3b82f6'>📍 Your Location</b><br>Lat: {user_lat:.6f}<br>Lon: {user_lon:.6f}",max_width=200),
+            icon=folium.Icon(color="blue",icon="user",prefix="fa")).add_to(m)
+        folium.Circle(location=[user_lat,user_lon],radius=40,color="#3b82f6",fill=True,fill_opacity=.12,weight=2).add_to(m)
+        folium.Circle(location=[user_lat,user_lon],radius=alert_radius,color="#fbbf24",fill=True,fill_opacity=.04,weight=1,dash_array="6",tooltip=f"⚠️ Alert zone ({alert_radius}m)").add_to(m)
     for row in rows:
-        sev = row["severity"]
-        is_near = (
-            user_lat and user_lon and
-            haversine(user_lat, user_lon, row["latitude"], row["longitude"]) <= alert_radius
-        )
-        dist = (
-            round(haversine(user_lat, user_lon, row["latitude"], row["longitude"]))
-            if user_lat and user_lon else None
-        )
-        # Nearby potholes go red like file 2; others follow severity color
-        color  = [255, 0, 0] if is_near else SEV_COLOR.get(sev, [150, 150, 150])
-        radius = 80 if is_near else 50    # file 2 used 80 for POTHOLE
+        sev=row["severity"];color=FOLIUM_COLORS.get(sev,"gray")
+        is_near=user_lat and user_lon and haversine(user_lat,user_lon,row["latitude"],row["longitude"])<=alert_radius
+        dist=round(haversine(user_lat,user_lon,row["latitude"],row["longitude"])) if user_lat and user_lon else None
+        img_html=""
+        if row.get("image_path") and os.path.exists(row.get("image_path","")):
+            b64=db.get_image_base64(row["image_path"])
+            if b64: img_html=f'<img src="data:image/jpeg;base64,{b64}" style="width:200px;border-radius:6px;margin-top:6px"><br>'
+        folium.CircleMarker(location=[row["latitude"],row["longitude"]],radius=20,
+            color="red" if is_near else color,fill=True,fill_opacity=.10,weight=1).add_to(m)
+        folium.CircleMarker(location=[row["latitude"],row["longitude"]],radius=10,
+            color="red" if is_near else color,fill=True,fill_opacity=.88,weight=2,
+            popup=folium.Popup(f"""
+              <div style='font-family:sans-serif;font-size:12px;min-width:210px'>
+                <b style='font-size:14px'>🚧 Pothole #{row['id']}</b>
+                <hr style='margin:4px 0'>
+                {img_html}
+                <b>Severity:</b> {sev}<br>
+                <b>Confidence:</b> {float(row['confidence']):.1%}<br>
+                <b>Count:</b> {row['pothole_count']}<br>
+                <b>Time:</b> {row['timestamp']}<br>
+                <b>Lat:</b> {row['latitude']}<br>
+                <b>Lon:</b> {row['longitude']}
+                {'<br><b style="color:red">⚠️ '+str(dist)+'m away!</b>' if is_near else ''}
+              </div>""",max_width=250),
+            tooltip=f"{'⚠️ ' if is_near else ''}🚧 {sev}{' — '+str(dist)+'m' if dist else ''}").add_to(m)
+    legend="""<div style="position:fixed;bottom:30px;left:30px;z-index:9999;
+        background:#0f1923;border:1px solid #1e3a52;border-radius:12px;
+        padding:14px 18px;font-family:monospace;font-size:12px;color:#e2e8f0;
+        box-shadow:0 4px 24px rgba(0,0,0,.6)">
+      <b style="color:#ffa000;font-size:13px">🗺️ Legend</b><br><br>
+      <span style="color:#3b82f6;font-size:18px">●</span> Your location<br>
+      <span style="color:green;font-size:18px">●</span> LOW pothole<br>
+      <span style="color:orange;font-size:18px">●</span> MEDIUM pothole<br>
+      <span style="color:red;font-size:18px">●</span> HIGH / nearby<br>
+      <span style="color:#fbbf24">⬡</span> Alert zone
+    </div>"""
+    m.get_root().html.add_child(folium.Element(legend))
+    return m
 
-        label = f"⚠️ {sev} — {dist}m away" if is_near else f"🚧 {sev} #{row['id']}"
-
-        map_data.append({
-            "lat":    row["latitude"],
-            "lon":    row["longitude"],
-            "color":  color,
-            "radius": radius,
-            "type":   label,
-        })
-
-    df = pd.DataFrame(map_data) if map_data else pd.DataFrame(
-        columns=["lat", "lon", "color", "radius", "type"]
-    )
-
-    # ── ScatterplotLayer  (directly from file 2) ──────────────────────────────
-    layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=df,
-        get_position="[lon, lat]",
-        get_fill_color="color",
-        get_radius="radius",
-        pickable=True,
-    )
-
-    # ── View state: centre on user if available, else average of pins ─────────
-    if user_lat and user_lon:
-        centre_lat, centre_lon, zoom = user_lat, user_lon, 15
-    elif rows:
-        centre_lat = sum(r["latitude"]  for r in rows) / len(rows)
-        centre_lon = sum(r["longitude"] for r in rows) / len(rows)
-        zoom = 13
-    else:
-        centre_lat, centre_lon, zoom = 20.5937, 78.9629, 5
-
-    # ── pdk.Deck  (matches file 2's st.pydeck_chart call) ────────────────────
-    return pdk.Deck(
-        layers=[layer],
-        initial_view_state=pdk.ViewState(
-            latitude=centre_lat,
-            longitude=centre_lon,
-            zoom=zoom,
-        ),
-        tooltip={"html": "<b>{type}</b>"},   # file 2 used same tooltip pattern
-    )
-
-
-# ─── GPS HTML component ───────────────────────────────────────────────────────
 GPS_HTML = """
 <div id="gps-box" style="background:#0f1923;border:1px solid #1a2d3d;border-radius:12px;
      padding:1rem 1.2rem;font-family:monospace;font-size:.82rem;color:#94a3b8;">
@@ -339,7 +298,7 @@ function getLocation(){
     btn.textContent='📍 Detect My Location';btn.disabled=false;return;
   }
   navigator.geolocation.getCurrentPosition(function(pos){
-    var lat=pos.coords.latitude,lon=pos.coords.longitude;
+    var lat=pos.coords.latitude,lon=pos.coords.longitude,acc=pos.coords.accuracy;
     document.getElementById('lat-display').textContent=lat.toFixed(6);
     document.getElementById('lon-display').textContent=lon.toFixed(6);
     document.getElementById('gps-result').style.display='block';
@@ -347,10 +306,12 @@ function getLocation(){
     document.getElementById('gps-box').style.borderColor='#4ade80';
     status.style.color='#4ade80';status.textContent='✅ Got it!';
     btn.textContent='🔄 Refresh';btn.disabled=false;
+    // Write to URL so Streamlit can read it via query_params
     var url = new URL(window.location.href);
     url.searchParams.set('gps_lat', lat.toFixed(6));
     url.searchParams.set('gps_lon', lon.toFixed(6));
     window.history.replaceState({}, '', url);
+    // Also copy to clipboard for manual paste
     navigator.clipboard && navigator.clipboard.writeText(lat.toFixed(6)+', '+lon.toFixed(6));
   },function(err){
     var msgs={1:'Permission denied — please allow location.',2:'Position unavailable.',3:'Timeout — try again.'};
@@ -437,7 +398,7 @@ st.markdown(f"""
     <span class="hero-badge badge-new">🗄️ SQLite DB</span>
     <span class="hero-badge badge-new">🖼️ Image Storage</span>
     <span class="hero-badge badge-new">☁️ Cloud Sync</span>
-    <span class="hero-badge badge-new">🗺️ pydeck Map</span>
+    <span class="hero-badge">🗺️ Map</span>
     <span class="hero-badge">📊 Analytics</span>
   </div>
 </div>
@@ -461,7 +422,12 @@ tab1,tab2,tab3,tab4,tab5 = st.tabs([
     "🔍 Detect & Save","⚠️ Proximity Alert","🗺️ Map View","🗄️ Database","📊 Analytics"
 ])
 
-# ── GPS defaults from URL query params ────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — DETECT & SAVE
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Session state keys to persist detection results across reruns
+# ── Read GPS coordinates from URL query params (set by browser GPS button) ──
 _qp = st.query_params
 _gps_lat_default = float(_qp.get("gps_lat", 13.0827))
 _gps_lon_default = float(_qp.get("gps_lon", 80.2707))
@@ -472,9 +438,6 @@ for _k, _v in [("det_annotated", None), ("det_detections", None),
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — DETECT & SAVE  (unchanged)
-# ══════════════════════════════════════════════════════════════════════════════
 with tab1:
     cl,cr = st.columns([1,1],gap="large")
 
@@ -529,6 +492,7 @@ with tab1:
                 else:
                     with st.spinner("🔍 Running YOLOv8…"):
                         annotated, detections = run_detection(model, img_array, conf_thresh)
+                    # ── Store results in session_state so Save button works ──
                     st.session_state.det_annotated   = annotated
                     st.session_state.det_detections  = detections
                     st.session_state.det_avg_conf    = float(np.mean([d["confidence"] for d in detections])) if detections else 0.0
@@ -543,6 +507,7 @@ with tab1:
     with cr:
         st.markdown('<div class="section-title">🎯 Results</div>',unsafe_allow_html=True)
 
+        # Show results from session_state (persists across reruns / button clicks)
         if st.session_state.det_annotated is not None:
             annotated   = st.session_state.det_annotated
             detections  = st.session_state.det_detections
@@ -622,50 +587,62 @@ with tab1:
               </div></div>""",unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — PROXIMITY ALERT  (mini-map now uses pydeck from file 2)
+# TAB 2 — PROXIMITY ALERT
 # ══════════════════════════════════════════════════════════════════════════════
 with tab2:
-    st.markdown('<div class="section-title">⚠️ Live Proximity Alerts</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">⚠️ Proximity Alert System</div>',unsafe_allow_html=True)
+    st.markdown(f'<div class="info-card">Enter your current location to check if you are within <b style="color:#ffa000">{alert_radius}m</b> of any registered pothole.</div>',unsafe_allow_html=True)
 
-    st.markdown('<div class="info-card">Detect potholes near your current location and get alerts.</div>', unsafe_allow_html=True)
+    al,ar=st.columns([1,1],gap="large")
+    with al:
+        st.markdown('<div class="section-title">📍 Your Location</div>',unsafe_allow_html=True)
+        components.html(GPS_HTML,height=185)
+        st.markdown("**Or enter manually:**")
+        a1,a2=st.columns(2)
+        alat=a1.number_input("Your Latitude",value=_gps_lat_default,format="%.6f",step=.0001,key="a_lat")
+        alon=a2.number_input("Your Longitude",value=_gps_lon_default,format="%.6f",step=.0001,key="a_lon")
+        check_btn=st.button("🔍 Check Nearby Potholes",use_container_width=True)
 
-    # GPS input
-    c1, c2 = st.columns(2)
-    user_lat = c1.number_input("Your Latitude", value=_gps_lat_default, format="%.6f")
-    user_lon = c2.number_input("Your Longitude", value=_gps_lon_default, format="%.6f")
-
-    if st.button("🚨 Check Nearby Potholes", use_container_width=True):
-        rows = db.load_all_detections()
-
-        if not rows:
-            st.markdown('<div class="alert-info">ℹ️ No pothole data available.</div>', unsafe_allow_html=True)
-        else:
-            nearby = nearby_potholes(user_lat, user_lon, rows, alert_radius)
-
-            if not nearby:
-                st.markdown('<div class="alert-success">✅ No potholes nearby. Safe ride!</div>', unsafe_allow_html=True)
+    with ar:
+        st.markdown('<div class="section-title">🚨 Alert Results</div>',unsafe_allow_html=True)
+        db_rows=db.load_all_detections()
+        if check_btn:
+            if not db_rows:
+                st.markdown('<div class="alert-info">ℹ️ <b>No potholes in database yet.</b> Start reporting from the Detect tab.</div>',unsafe_allow_html=True)
             else:
-                st.markdown(f'<div class="alert-danger">🚨 {len(nearby)} pothole(s) within {alert_radius}m!</div>', unsafe_allow_html=True)
-
-                for r in nearby:
-                    sev = r["severity"]
-                    dist = r["distance_m"]
-
-                    color_class = {
-                        "LOW": "alert-success",
-                        "MEDIUM": "alert-warning",
-                        "HIGH": "alert-danger"
-                    }.get(sev, "alert-info")
-
-                    st.markdown(f"""
-                    <div class="{color_class}">
-                        ⚠️ <b>{sev} pothole</b> detected <b>{dist}m</b> away<br>
-                        📍 Lat: {r['latitude']}, Lon: {r['longitude']}
-                    </div>
-                    """, unsafe_allow_html=True)
+                near=nearby_potholes(alat,alon,db_rows,alert_radius)
+                if not near:
+                    st.markdown(f'<div class="alert-success">✅ <b>All clear! No potholes within {alert_radius}m.</b><br><span style="font-size:.82rem;color:#94a3b8">Drive safely! 🚗</span></div>',unsafe_allow_html=True)
+                else:
+                    worst_n=max(near,key=lambda x:["LOW","MEDIUM","HIGH"].index(x["severity"]))
+                    acls="alert-danger" if worst_n["severity"]=="HIGH" else "alert-warning"
+                    icon="🚨" if worst_n["severity"]=="HIGH" else "⚠️"
+                    st.markdown(f'<div class="{acls}">{icon} <b>{len(near)} POTHOLE(S) NEARBY!</b><br><span style="font-size:.82rem;">Closest: <b>{near[0]["distance_m"]}m</b> — {near[0]["severity"]}</span></div>',unsafe_allow_html=True)
+                    for p in near:
+                        sc=SEVERITY_COLORS.get(p["severity"],"#fff")
+                        img_html=""
+                        if p.get("image_path") and os.path.exists(p.get("image_path","")):
+                            b64=db.get_image_base64(p["image_path"])
+                            if b64: img_html=f'<img src="data:image/jpeg;base64,{b64}" style="width:100%;border-radius:6px;margin-top:6px">'
+                        st.markdown(f"""<div class="db-row" style="border-left:3px solid {sc};">
+                          <b style='color:{sc}'>{p["severity"]}</b> &nbsp;·&nbsp;
+                          <b style='color:#ffa000'>{p["distance_m"]}m away</b><br>
+                          📍 {p["latitude"]:.6f}, {p["longitude"]:.6f}<br>
+                          🎯 Conf: {float(p["confidence"]):.1%} · 🔢 Count: {p["pothole_count"]}<br>
+                          🕐 {p["timestamp"]}{img_html}
+                        </div>""",unsafe_allow_html=True)
+                mini=build_map(db_rows,user_lat=alat,user_lon=alon,alert_radius=alert_radius)
+                st_folium(mini,width=None,height=300,use_container_width=True)
+        else:
+            st.markdown("""<div style='height:200px;display:flex;flex-direction:column;
+              align-items:center;justify-content:center;text-align:center;'>
+              <div style='font-size:3rem;margin-bottom:.8rem;'>📡</div>
+              <div style='font-size:.9rem;color:#1e3a52;font-family:monospace;'>
+                Set your location and click<br><b>Check Nearby Potholes</b>
+              </div></div>""",unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — MAP VIEW  (pydeck from file 2, full-size)
+# TAB 3 — MAP
 # ══════════════════════════════════════════════════════════════════════════════
 with tab3:
     db_rows=db.load_all_detections()
@@ -681,7 +658,7 @@ with tab3:
         st.markdown("""<div style='background:#0f1923;border:1px solid #1a2d3d;border-radius:8px;
             padding:.6rem 1rem;font-family:monospace;font-size:.78rem;color:#5a7a9a;margin-bottom:.5rem;'>
             💡 Use the GPS button in the <b>Proximity Alert</b> tab to auto-fill your location,
-            then come back here. Or enter manually below.
+            then come back here and refresh. Or enter manually below.
             </div>""", unsafe_allow_html=True)
         m1,m2=st.columns(2)
         mlat=m1.number_input("My Lat",value=_gps_lat_default,format="%.6f",key="mv_lat")
@@ -702,23 +679,14 @@ with tab3:
           <div style='background:#3d0a0a;border:1px solid #7f1d1d;border-radius:8px;padding:.5rem 1rem;font-size:.82rem;color:#f87171;font-family:monospace;'>🔴 HIGH: {hn}</div>
         </div>""",unsafe_allow_html=True)
 
-    # ── Full-size pydeck map (extracted from file 2's map_placeholder block) ──
-    st.pydeck_chart(
-        build_map(
-            filtered,
-            user_lat=mlat if show_u else None,
-            user_lon=mlon if show_u else None,
-            alert_radius=alert_radius if show_ring else 0,
-        ),
-        use_container_width=True,
-        height=580,
-    )
-
-    if not db_rows:
-        st.info("No data yet. Detect and save potholes from the Detect tab.")
+    m=build_map(filtered,user_lat=mlat if show_u else None,
+                user_lon=mlon if show_u else None,
+                alert_radius=alert_radius if show_ring else 0)
+    st_folium(m,width=None,height=580,use_container_width=True)
+    if not db_rows: st.info("No data yet. Detect and save potholes from the Detect tab.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — DATABASE VIEWER  (unchanged)
+# TAB 4 — DATABASE VIEWER
 # ══════════════════════════════════════════════════════════════════════════════
 with tab4:
     st.markdown('<div class="section-title">🗄️ SQLite Database Records</div>',unsafe_allow_html=True)
@@ -727,6 +695,7 @@ with tab4:
     if not db_rows:
         st.info("No records yet.")
     else:
+        # Search / filter
         sf1,sf2,sf3=st.columns([2,1,1])
         with sf1: search=st.text_input("🔍 Search by date / severity",placeholder="e.g. HIGH or 2024-01")
         with sf2: sev_db=st.multiselect("Severity",["LOW","MEDIUM","HIGH"],default=["LOW","MEDIUM","HIGH"],key="db_sev")
@@ -765,6 +734,7 @@ with tab4:
                       <b>Cloud synced:</b> {'✅ Yes' if row['synced'] else '🔴 No'}
                     </div>""",unsafe_allow_html=True)
 
+                    # Bounding boxes
                     _,boxes=db.load_detection_with_boxes(row["id"])
                     if boxes:
                         st.markdown("**Bounding Boxes:**")
@@ -796,13 +766,14 @@ with tab4:
                     if st.button(f"🗑️ Delete #{row['id']}",key=f"del_{row['id']}"):
                         db.delete_detection(row["id"]); st.rerun()
 
+        # Export
         st.markdown("---")
         csv_str=db.export_to_csv()
         if csv_str:
             st.download_button("⬇️ Export All as CSV",csv_str.encode(),"pothole_export.csv","text/csv")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — ANALYTICS  (unchanged)
+# TAB 5 — ANALYTICS
 # ══════════════════════════════════════════════════════════════════════════════
 with tab5:
     db_rows=db.load_all_detections()
@@ -855,7 +826,7 @@ st.markdown("""
 <div style='text-align:center;padding:1.5rem 0 .5rem;font-family:monospace;
      font-size:.78rem;color:#1e3a52;line-height:2'>
   🚧 <b style='color:#ffa000'>PotholeAI v2</b> · Smart Road Safety System<br>
-  YOLOv8 OBB · SQLite · Image Storage · Supabase Cloud Sync · pydeck Maps<br>
+  YOLOv8 OBB · SQLite · Image Storage · Supabase Cloud Sync · Folium Maps<br>
   <span style='color:#0f2030'>Making roads safer, one detection at a time.</span>
 </div>
 """,unsafe_allow_html=True)
