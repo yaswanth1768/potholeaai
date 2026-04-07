@@ -14,16 +14,7 @@ Features:
 import streamlit as st
 import streamlit.components.v1 as components
 import math, os
-import subprocess
-result = subprocess.run(["python", "-c", "import cv2"], capture_output=True, text=True)
-print("STDOUT:", result.stdout)
-print("STDERR:", result.stderr)
-try:
-    import cv2
-except Exception as e:
-    import traceback
-    traceback.print_exc()
-    raise
+import cv2
 import numpy as np
 import pandas as pd
 import folium
