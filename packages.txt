@@ -2,5 +2,4 @@ libjpeg-dev
 zlib1g-dev
 libpng-dev
 libwebp-dev
-libtiff-devlibjpeg-dev
-zlib1g-dev
+libtiff-dev
