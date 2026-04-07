@@ -1,8 +1,8 @@
-streamlit==1.32.0
+streamlit==1.43.0
 ultralytics==8.4.34
 opencv-python-headless==4.9.0.80
 numpy==1.26.4
-pandas==2.3.3
+pandas==2.2.3
 folium==0.20.0
 streamlit-folium==0.27.1
 Pillow==10.4.0
