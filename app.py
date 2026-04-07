@@ -13,7 +13,13 @@ Features:
 
 import streamlit as st
 import streamlit.components.v1 as components
-import cv2, math, os
+import math, os
+try:
+    import cv2
+except ImportError as e:
+    import streamlit as st
+    st.error(f'OpenCV import failed: {e}. Check requirements.txt and Python version.')
+    st.stop()
 import numpy as np
 import pandas as pd
 import folium
@@ -22,6 +28,21 @@ from ultralytics import YOLO
 from PIL import Image
 from datetime import datetime
 import base64
+
+# ── Load secrets: Streamlit Cloud first, then .env ───────────────────────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+try:
+    if "SUPABASE_URL" in st.secrets:
+        os.environ["SUPABASE_URL"] = st.secrets["SUPABASE_URL"]
+    if "SUPABASE_KEY" in st.secrets:
+        os.environ["SUPABASE_KEY"] = st.secrets["SUPABASE_KEY"]
+except Exception:
+    pass
 
 import database  as db
 import cloud_sync as cs
