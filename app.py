@@ -274,14 +274,16 @@ GPS_HTML = """
     <span id="gps-status" style="color:#5a7a9a;font-size:.78rem;">Not detected</span>
   </div>
   <div id="gps-result" style="display:none;">
-    <div style="color:#4ade80;margin-bottom:.3rem;">✅ Location detected — copied to clipboard!</div>
+    <div style="color:#4ade80;margin-bottom:.4rem;">✅ Location detected!</div>
     <div>Lat: <span id="lat-display" style="color:#ffa000;font-weight:600;"></span></div>
     <div>Lon: <span id="lon-display" style="color:#ffa000;font-weight:600;"></span></div>
-    <div>Accuracy: <span id="acc-display" style="color:#94a3b8;"></span></div>
+    <div style="margin-top:.5rem;font-size:.75rem;color:#5a7a9a;">
+      👇 Copy these values into the number inputs below
+    </div>
   </div>
   <div id="gps-error" style="display:none;color:#f87171;margin-top:.3rem;"></div>
   <div style="margin-top:.8rem;padding-top:.8rem;border-top:1px solid #1a2d3d;font-size:.75rem;color:#5a7a9a;">
-    💡 Allow location access when browser asks. Coordinates auto-copied to clipboard.
+    💡 Click the button → copy the detected coordinates → paste into Latitude/Longitude fields below.
   </div>
 </div>
 <script>
@@ -299,20 +301,25 @@ function getLocation(){
     var lat=pos.coords.latitude,lon=pos.coords.longitude,acc=pos.coords.accuracy;
     document.getElementById('lat-display').textContent=lat.toFixed(6);
     document.getElementById('lon-display').textContent=lon.toFixed(6);
-    document.getElementById('acc-display').textContent='±'+Math.round(acc)+'m';
     document.getElementById('gps-result').style.display='block';
     document.getElementById('gps-error').style.display='none';
     document.getElementById('gps-box').style.borderColor='#4ade80';
-    status.style.color='#4ade80';status.textContent='Live';
+    status.style.color='#4ade80';status.textContent='✅ Got it!';
     btn.textContent='🔄 Refresh';btn.disabled=false;
-    navigator.clipboard&&navigator.clipboard.writeText(lat.toFixed(6)+', '+lon.toFixed(6));
+    // Write to URL so Streamlit can read it via query_params
+    var url = new URL(window.location.href);
+    url.searchParams.set('gps_lat', lat.toFixed(6));
+    url.searchParams.set('gps_lon', lon.toFixed(6));
+    window.history.replaceState({}, '', url);
+    // Also copy to clipboard for manual paste
+    navigator.clipboard && navigator.clipboard.writeText(lat.toFixed(6)+', '+lon.toFixed(6));
   },function(err){
-    var msgs={1:'Permission denied.',2:'Position unavailable.',3:'Timeout.'};
+    var msgs={1:'Permission denied — please allow location.',2:'Position unavailable.',3:'Timeout — try again.'};
     document.getElementById('gps-error').style.display='block';
     document.getElementById('gps-error').textContent='❌ '+(msgs[err.code]||err.message);
     status.style.color='#f87171';status.textContent='Error';
     btn.textContent='📍 Detect My Location';btn.disabled=false;
-  },{enableHighAccuracy:true,timeout:12000,maximumAge:0});
+  },{enableHighAccuracy:true,timeout:15000,maximumAge:0});
 }
 </script>
 """
@@ -420,6 +427,11 @@ tab1,tab2,tab3,tab4,tab5 = st.tabs([
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Session state keys to persist detection results across reruns
+# ── Read GPS coordinates from URL query params (set by browser GPS button) ──
+_qp = st.query_params
+_gps_lat_default = float(_qp.get("gps_lat", 13.0827))
+_gps_lon_default = float(_qp.get("gps_lon", 80.2707))
+
 for _k, _v in [("det_annotated", None), ("det_detections", None),
                 ("det_avg_conf", None), ("det_worst", None),
                 ("det_count", 0), ("det_saved", False)]:
@@ -587,8 +599,8 @@ with tab2:
         components.html(GPS_HTML,height=185)
         st.markdown("**Or enter manually:**")
         a1,a2=st.columns(2)
-        alat=a1.number_input("Your Latitude",value=13.0827,format="%.6f",step=.0001,key="a_lat")
-        alon=a2.number_input("Your Longitude",value=80.2707,format="%.6f",step=.0001,key="a_lon")
+        alat=a1.number_input("Your Latitude",value=_gps_lat_default,format="%.6f",step=.0001,key="a_lat")
+        alon=a2.number_input("Your Longitude",value=_gps_lon_default,format="%.6f",step=.0001,key="a_lon")
         check_btn=st.button("🔍 Check Nearby Potholes",use_container_width=True)
 
     with ar:
@@ -643,9 +655,14 @@ with tab3:
 
     mlat,mlon=None,None
     if show_u:
+        st.markdown("""<div style='background:#0f1923;border:1px solid #1a2d3d;border-radius:8px;
+            padding:.6rem 1rem;font-family:monospace;font-size:.78rem;color:#5a7a9a;margin-bottom:.5rem;'>
+            💡 Use the GPS button in the <b>Proximity Alert</b> tab to auto-fill your location,
+            then come back here and refresh. Or enter manually below.
+            </div>""", unsafe_allow_html=True)
         m1,m2=st.columns(2)
-        mlat=m1.number_input("My Lat",value=13.0827,format="%.6f",key="mv_lat")
-        mlon=m2.number_input("My Lon",value=80.2707,format="%.6f",key="mv_lon")
+        mlat=m1.number_input("My Lat",value=_gps_lat_default,format="%.6f",key="mv_lat")
+        mlon=m2.number_input("My Lon",value=_gps_lon_default,format="%.6f",key="mv_lon")
 
     filtered=[r for r in db_rows if r["severity"] in sev_filter]
 
