@@ -625,61 +625,44 @@ with tab1:
 # TAB 2 — PROXIMITY ALERT  (mini-map now uses pydeck from file 2)
 # ══════════════════════════════════════════════════════════════════════════════
 with tab2:
-    st.markdown('<div class="section-title">⚠️ Proximity Alert System</div>',unsafe_allow_html=True)
-    st.markdown(f'<div class="info-card">Enter your current location to check if you are within <b style="color:#ffa000">{alert_radius}m</b> of any registered pothole.</div>',unsafe_allow_html=True)
+    st.markdown('<div class="section-title">⚠️ Live Proximity Alerts</div>', unsafe_allow_html=True)
 
-    al,ar=st.columns([1,1],gap="large")
-    with al:
-        st.markdown('<div class="section-title">📍 Your Location</div>',unsafe_allow_html=True)
-        components.html(GPS_HTML,height=185)
-        st.markdown("**Or enter manually:**")
-        a1,a2=st.columns(2)
-        alat=a1.number_input("Your Latitude",value=_gps_lat_default,format="%.6f",step=.0001,key="a_lat")
-        alon=a2.number_input("Your Longitude",value=_gps_lon_default,format="%.6f",step=.0001,key="a_lon")
-        check_btn=st.button("🔍 Check Nearby Potholes",use_container_width=True)
+    st.markdown('<div class="info-card">Detect potholes near your current location and get alerts.</div>', unsafe_allow_html=True)
 
-    with ar:
-        st.markdown('<div class="section-title">🚨 Alert Results</div>',unsafe_allow_html=True)
-        db_rows=db.load_all_detections()
-        if check_btn:
-            if not db_rows:
-                st.markdown('<div class="alert-info">ℹ️ <b>No potholes in database yet.</b> Start reporting from the Detect tab.</div>',unsafe_allow_html=True)
-            else:
-                near=nearby_potholes(alat,alon,db_rows,alert_radius)
-                if not near:
-                    st.markdown(f'<div class="alert-success">✅ <b>All clear! No potholes within {alert_radius}m.</b><br><span style="font-size:.82rem;color:#94a3b8">Drive safely! 🚗</span></div>',unsafe_allow_html=True)
-                else:
-                    worst_n=max(near,key=lambda x:["LOW","MEDIUM","HIGH"].index(x["severity"]))
-                    acls="alert-danger" if worst_n["severity"]=="HIGH" else "alert-warning"
-                    icon="🚨" if worst_n["severity"]=="HIGH" else "⚠️"
-                    st.markdown(f'<div class="{acls}">{icon} <b>{len(near)} POTHOLE(S) NEARBY!</b><br><span style="font-size:.82rem;">Closest: <b>{near[0]["distance_m"]}m</b> — {near[0]["severity"]}</span></div>',unsafe_allow_html=True)
-                    for p in near:
-                        sc=SEVERITY_COLORS.get(p["severity"],"#fff")
-                        img_html=""
-                        if p.get("image_path") and os.path.exists(p.get("image_path","")):
-                            b64=db.get_image_base64(p["image_path"])
-                            if b64: img_html=f'<img src="data:image/jpeg;base64,{b64}" style="width:100%;border-radius:6px;margin-top:6px">'
-                        st.markdown(f"""<div class="db-row" style="border-left:3px solid {sc};">
-                          <b style='color:{sc}'>{p["severity"]}</b> &nbsp;·&nbsp;
-                          <b style='color:#ffa000'>{p["distance_m"]}m away</b><br>
-                          📍 {p["latitude"]:.6f}, {p["longitude"]:.6f}<br>
-                          🎯 Conf: {float(p["confidence"]):.1%} · 🔢 Count: {p["pothole_count"]}<br>
-                          🕐 {p["timestamp"]}{img_html}
-                        </div>""",unsafe_allow_html=True)
+    # GPS input
+    c1, c2 = st.columns(2)
+    user_lat = c1.number_input("Your Latitude", value=_gps_lat_default, format="%.6f")
+    user_lon = c2.number_input("Your Longitude", value=_gps_lon_default, format="%.6f")
 
-                # ── Mini-map using pydeck (extracted from file 2) ──────────────
-                st.pydeck_chart(
-                    build_map(db_rows, user_lat=alat, user_lon=alon, alert_radius=alert_radius),
-                    use_container_width=True,
-                    height=300,
-                )
+    if st.button("🚨 Check Nearby Potholes", use_container_width=True):
+        rows = db.load_all_detections()
+
+        if not rows:
+            st.markdown('<div class="alert-info">ℹ️ No pothole data available.</div>', unsafe_allow_html=True)
         else:
-            st.markdown("""<div style='height:200px;display:flex;flex-direction:column;
-              align-items:center;justify-content:center;text-align:center;'>
-              <div style='font-size:3rem;margin-bottom:.8rem;'>📡</div>
-              <div style='font-size:.9rem;color:#1e3a52;font-family:monospace;'>
-                Set your location and click<br><b>Check Nearby Potholes</b>
-              </div></div>""",unsafe_allow_html=True)
+            nearby = nearby_potholes(user_lat, user_lon, rows, alert_radius)
+
+            if not nearby:
+                st.markdown('<div class="alert-success">✅ No potholes nearby. Safe ride!</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="alert-danger">🚨 {len(nearby)} pothole(s) within {alert_radius}m!</div>', unsafe_allow_html=True)
+
+                for r in nearby:
+                    sev = r["severity"]
+                    dist = r["distance_m"]
+
+                    color_class = {
+                        "LOW": "alert-success",
+                        "MEDIUM": "alert-warning",
+                        "HIGH": "alert-danger"
+                    }.get(sev, "alert-info")
+
+                    st.markdown(f"""
+                    <div class="{color_class}">
+                        ⚠️ <b>{sev} pothole</b> detected <b>{dist}m</b> away<br>
+                        📍 Lat: {r['latitude']}, Lon: {r['longitude']}
+                    </div>
+                    """, unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — MAP VIEW  (pydeck from file 2, full-size)
