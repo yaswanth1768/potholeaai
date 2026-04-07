@@ -1,2 +1,5 @@
-libgl1
-libglib2.0-0t64
+libjpeg-dev
+zlib1g-dev
+libpng-dev
+libwebp-dev
+libtiff-dev
