@@ -9,6 +9,7 @@ Features:
   ✅ Live GPS + proximity alerts
   ✅ Interactive Folium map
   ✅ Analytics dashboard
+  ✅ FIX: Image upload persisted in session_state (Streamlit Cloud rerun fix)
 """
 import os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -302,12 +303,10 @@ function getLocation(){
     document.getElementById('gps-box').style.borderColor='#4ade80';
     status.style.color='#4ade80';status.textContent='✅ Got it!';
     btn.textContent='🔄 Refresh';btn.disabled=false;
-    // Write to URL so Streamlit can read it via query_params
     var url = new URL(window.location.href);
     url.searchParams.set('gps_lat', lat.toFixed(6));
     url.searchParams.set('gps_lon', lon.toFixed(6));
     window.history.replaceState({}, '', url);
-    // Also copy to clipboard for manual paste
     navigator.clipboard && navigator.clipboard.writeText(lat.toFixed(6)+', '+lon.toFixed(6));
   },function(err){
     var msgs={1:'Permission denied — please allow location.',2:'Position unavailable.',3:'Timeout — try again.'};
@@ -419,41 +418,82 @@ tab1,tab2,tab3,tab4,tab5 = st.tabs([
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — DETECT & SAVE
+# SESSION STATE INITIALISATION
+# ── All keys declared here so reruns never lose state ────────────────────────
 # ══════════════════════════════════════════════════════════════════════════════
 
-# Session state keys to persist detection results across reruns
-# ── Read GPS coordinates from URL query params (set by browser GPS button) ──
+# Read GPS coordinates from URL query params (set by browser GPS button)
 _qp = st.query_params
 _gps_lat_default = float(_qp.get("gps_lat", 13.0827))
 _gps_lon_default = float(_qp.get("gps_lon", 80.2707))
 
-for _k, _v in [("det_annotated", None), ("det_detections", None),
-                ("det_avg_conf", None), ("det_worst", None),
-                ("det_count", 0), ("det_saved", False)]:
+for _k, _v in [
+    ("det_annotated",      None),
+    ("det_detections",     None),
+    ("det_avg_conf",       None),
+    ("det_worst",          None),
+    ("det_count",          0),
+    ("det_saved",          False),
+    ("det_lat",            _gps_lat_default),
+    ("det_lon",            _gps_lon_default),
+    # ── FIX: persist uploaded image across reruns ──
+    ("uploaded_img_array", None),
+    ("uploaded_pil_img",   None),
+]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — DETECT & SAVE
+# ══════════════════════════════════════════════════════════════════════════════
 with tab1:
     cl,cr = st.columns([1,1],gap="large")
 
     with cl:
         st.markdown('<div class="section-title">📷 Road Image</div>',unsafe_allow_html=True)
-        uploaded = st.file_uploader("Upload road/pothole image",
-                                    type=["jpg","jpeg","png","bmp","webp"],
-                                    label_visibility="collapsed")
-        if uploaded:
+
+        uploaded = st.file_uploader(
+            "Upload road/pothole image",
+            type=["jpg","jpeg","png","bmp","webp"],
+            label_visibility="collapsed"
+        )
+
+        # ── FIX: store image in session_state as soon as it arrives ──────────
+        if uploaded is not None:
             pil_img   = Image.open(uploaded).convert("RGB")
             img_array = np.array(pil_img)
-            st.image(pil_img, caption="Uploaded image", use_container_width=True)
+            st.session_state.uploaded_pil_img   = pil_img
+            st.session_state.uploaded_img_array = img_array
+            # New file uploaded → reset previous detection results
+            st.session_state.det_annotated  = None
+            st.session_state.det_detections = None
+            st.session_state.det_saved      = False
+
+        # Show preview from session_state (survives button-click reruns)
+        if st.session_state.uploaded_pil_img is not None:
+            st.image(
+                st.session_state.uploaded_pil_img,
+                caption="Uploaded image",
+                use_container_width=True
+            )
+            # Clear image button
+            if st.button("🗑️ Clear image", key="clear_img"):
+                st.session_state.uploaded_pil_img   = None
+                st.session_state.uploaded_img_array = None
+                st.session_state.det_annotated      = None
+                st.session_state.det_detections     = None
+                st.session_state.det_saved          = False
+                st.rerun()
 
         st.markdown('<div class="section-title">📍 Pothole Location</div>',unsafe_allow_html=True)
         st.markdown('<div class="info-card">Set the location <b>where the pothole was found</b>. This becomes the map pin.</div>',unsafe_allow_html=True)
 
-        loc_method = st.radio("Location method",
-                              ["🌐 Auto GPS","✏️ Manual entry","📋 Paste from Google Maps"],
-                              label_visibility="collapsed")
-        lat, lon, gps_ok = 13.0827, 80.2707, False
+        loc_method = st.radio(
+            "Location method",
+            ["🌐 Auto GPS","✏️ Manual entry","📋 Paste from Google Maps"],
+            label_visibility="collapsed"
+        )
+        lat, lon, gps_ok = _gps_lat_default, _gps_lon_default, False
 
         if loc_method == "🌐 Auto GPS":
             components.html(GPS_HTML, height=185)
@@ -479,49 +519,74 @@ with tab1:
                     st.error("Format: 13.082700, 80.270700")
 
         if gps_ok:
-            st.markdown(f'<div class="gps-card gps-active">📌 Will save at: <span class="coord-value">{lat:.6f}, {lon:.6f}</span></div>',unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="gps-card gps-active">📌 Will save at: '
+                f'<span class="coord-value">{lat:.6f}, {lon:.6f}</span></div>',
+                unsafe_allow_html=True
+            )
 
-        if uploaded:
+        # ── FIX: gate on session_state image, not the transient `uploaded` var ──
+        if st.session_state.uploaded_img_array is not None:
             if st.button("🚀 Run Detection", use_container_width=True):
                 if model is None:
                     st.error("❌ Model not loaded. Upload best.pt in sidebar.")
                 else:
                     with st.spinner("🔍 Running YOLOv8…"):
-                        annotated, detections = run_detection(model, img_array, conf_thresh)
-                    # ── Store results in session_state so Save button works ──
-                    st.session_state.det_annotated   = annotated
-                    st.session_state.det_detections  = detections
-                    st.session_state.det_avg_conf    = float(np.mean([d["confidence"] for d in detections])) if detections else 0.0
-                    st.session_state.det_worst       = max(detections, key=lambda d: d["area"])["severity"] if detections else None
-                    st.session_state.det_count       = len(detections)
-                    st.session_state.det_saved       = False
-                    st.session_state.det_lat         = lat
-                    st.session_state.det_lon         = lon
+                        annotated, detections = run_detection(
+                            model,
+                            st.session_state.uploaded_img_array,
+                            conf_thresh
+                        )
+                    st.session_state.det_annotated  = annotated
+                    st.session_state.det_detections = detections
+                    st.session_state.det_avg_conf   = (
+                        float(np.mean([d["confidence"] for d in detections]))
+                        if detections else 0.0
+                    )
+                    st.session_state.det_worst  = (
+                        max(detections, key=lambda d: d["area"])["severity"]
+                        if detections else None
+                    )
+                    st.session_state.det_count  = len(detections)
+                    st.session_state.det_saved  = False
+                    st.session_state.det_lat    = lat
+                    st.session_state.det_lon    = lon
         else:
             st.info("👆 Upload a road image to begin.")
 
+    # ── Right column: results ─────────────────────────────────────────────────
     with cr:
         st.markdown('<div class="section-title">🎯 Results</div>',unsafe_allow_html=True)
 
-        # Show results from session_state (persists across reruns / button clicks)
         if st.session_state.det_annotated is not None:
             annotated   = st.session_state.det_annotated
             detections  = st.session_state.det_detections
             avg_conf    = st.session_state.det_avg_conf
             worst       = st.session_state.det_worst
             count       = st.session_state.det_count
-            saved_lat   = st.session_state.get("det_lat", lat)
-            saved_lon   = st.session_state.get("det_lon", lon)
+            saved_lat   = st.session_state.det_lat
+            saved_lon   = st.session_state.det_lon
 
             st.image(annotated, caption="Detection output", use_container_width=True, channels="RGB")
 
             if not detections:
-                st.markdown('<div class="alert-success">✅ <b>No potholes detected.</b> Road appears clear.</div>',unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="alert-success">✅ <b>No potholes detected.</b> Road appears clear.</div>',
+                    unsafe_allow_html=True
+                )
             else:
                 if worst == "HIGH":
-                    st.markdown(f'<div class="alert-danger">🚨 <b>DANGEROUS POTHOLE DETECTED</b><br><span style="font-size:.82rem;color:#fca5a5">{count} HIGH-severity pothole(s).</span></div>',unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div class="alert-danger">🚨 <b>DANGEROUS POTHOLE DETECTED</b><br>'
+                        f'<span style="font-size:.82rem;color:#fca5a5">{count} HIGH-severity pothole(s).</span></div>',
+                        unsafe_allow_html=True
+                    )
                 elif worst == "MEDIUM":
-                    st.markdown(f'<div class="alert-warning">⚠️ <b>MODERATE POTHOLE DETECTED</b><br><span style="font-size:.82rem;color:#fde68a">{count} pothole(s). Caution advised.</span></div>',unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div class="alert-warning">⚠️ <b>MODERATE POTHOLE DETECTED</b><br>'
+                        f'<span style="font-size:.82rem;color:#fde68a">{count} pothole(s). Caution advised.</span></div>',
+                        unsafe_allow_html=True
+                    )
 
                 st.markdown(f"""<div class="metric-row">
                   <div class="metric-card"><div class="metric-val">{count}</div><div class="metric-label">Detected</div></div>
@@ -533,11 +598,21 @@ with tab1:
                     rows_md = []
                     for i,d in enumerate(detections, 1):
                         bc = f"badge-{d['severity'].lower()}"
-                        rows_md.append(f"| **#{i}** | <span class='{bc}'>{d['severity']}</span> | `{d['confidence']:.1%}` | `{d['area']:,}px²` | `{d['bbox']}` |")
-                    st.markdown("| # | Severity | Confidence | Area | BBox |\n|---|---|---|---|---|\n"+"\n".join(rows_md),unsafe_allow_html=True)
+                        rows_md.append(
+                            f"| **#{i}** | <span class='{bc}'>{d['severity']}</span> | "
+                            f"`{d['confidence']:.1%}` | `{d['area']:,}px²` | `{d['bbox']}` |"
+                        )
+                    st.markdown(
+                        "| # | Severity | Confidence | Area | BBox |\n|---|---|---|---|---|\n"
+                        + "\n".join(rows_md),
+                        unsafe_allow_html=True
+                    )
 
                 if st.session_state.det_saved:
-                    st.markdown('<div class="alert-success">✅ <b>Already saved to database!</b> Check the Database tab.</div>',unsafe_allow_html=True)
+                    st.markdown(
+                        '<div class="alert-success">✅ <b>Already saved to database!</b> Check the Database tab.</div>',
+                        unsafe_allow_html=True
+                    )
                 else:
                     st.markdown('<div class="section-title">💾 Save to Database</div>',unsafe_allow_html=True)
                     st.markdown(f"""<div class="save-preview">
@@ -587,7 +662,11 @@ with tab1:
 # ══════════════════════════════════════════════════════════════════════════════
 with tab2:
     st.markdown('<div class="section-title">⚠️ Proximity Alert System</div>',unsafe_allow_html=True)
-    st.markdown(f'<div class="info-card">Enter your current location to check if you are within <b style="color:#ffa000">{alert_radius}m</b> of any registered pothole.</div>',unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="info-card">Enter your current location to check if you are within '
+        f'<b style="color:#ffa000">{alert_radius}m</b> of any registered pothole.</div>',
+        unsafe_allow_html=True
+    )
 
     al,ar=st.columns([1,1],gap="large")
     with al:
@@ -604,16 +683,28 @@ with tab2:
         db_rows=db.load_all_detections()
         if check_btn:
             if not db_rows:
-                st.markdown('<div class="alert-info">ℹ️ <b>No potholes in database yet.</b> Start reporting from the Detect tab.</div>',unsafe_allow_html=True)
+                st.markdown(
+                    '<div class="alert-info">ℹ️ <b>No potholes in database yet.</b> Start reporting from the Detect tab.</div>',
+                    unsafe_allow_html=True
+                )
             else:
                 near=nearby_potholes(alat,alon,db_rows,alert_radius)
                 if not near:
-                    st.markdown(f'<div class="alert-success">✅ <b>All clear! No potholes within {alert_radius}m.</b><br><span style="font-size:.82rem;color:#94a3b8">Drive safely! 🚗</span></div>',unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div class="alert-success">✅ <b>All clear! No potholes within {alert_radius}m.</b>'
+                        f'<br><span style="font-size:.82rem;color:#94a3b8">Drive safely! 🚗</span></div>',
+                        unsafe_allow_html=True
+                    )
                 else:
                     worst_n=max(near,key=lambda x:["LOW","MEDIUM","HIGH"].index(x["severity"]))
                     acls="alert-danger" if worst_n["severity"]=="HIGH" else "alert-warning"
                     icon="🚨" if worst_n["severity"]=="HIGH" else "⚠️"
-                    st.markdown(f'<div class="{acls}">{icon} <b>{len(near)} POTHOLE(S) NEARBY!</b><br><span style="font-size:.82rem;">Closest: <b>{near[0]["distance_m"]}m</b> — {near[0]["severity"]}</span></div>',unsafe_allow_html=True)
+                    st.markdown(
+                        f'<div class="{acls}">{icon} <b>{len(near)} POTHOLE(S) NEARBY!</b>'
+                        f'<br><span style="font-size:.82rem;">Closest: <b>{near[0]["distance_m"]}m</b>'
+                        f' — {near[0]["severity"]}</span></div>',
+                        unsafe_allow_html=True
+                    )
                     for p in near:
                         sc=SEVERITY_COLORS.get(p["severity"],"#fff")
                         img_html=""
@@ -691,7 +782,6 @@ with tab4:
     if not db_rows:
         st.info("No records yet.")
     else:
-        # Search / filter
         sf1,sf2,sf3=st.columns([2,1,1])
         with sf1: search=st.text_input("🔍 Search by date / severity",placeholder="e.g. HIGH or 2024-01")
         with sf2: sev_db=st.multiselect("Severity",["LOW","MEDIUM","HIGH"],default=["LOW","MEDIUM","HIGH"],key="db_sev")
@@ -730,13 +820,16 @@ with tab4:
                       <b>Cloud synced:</b> {'✅ Yes' if row['synced'] else '🔴 No'}
                     </div>""",unsafe_allow_html=True)
 
-                    # Bounding boxes
                     _,boxes=db.load_detection_with_boxes(row["id"])
                     if boxes:
                         st.markdown("**Bounding Boxes:**")
                         for b in boxes:
                             bc=f"badge-{b['severity'].lower()}"
-                            st.markdown(f"Box #{b['box_index']+1}: <span class='{bc}'>{b['severity']}</span> `{b['confidence']:.1%}` area={b['area_px']:,}px²",unsafe_allow_html=True)
+                            st.markdown(
+                                f"Box #{b['box_index']+1}: <span class='{bc}'>{b['severity']}</span> "
+                                f"`{b['confidence']:.1%}` area={b['area_px']:,}px²",
+                                unsafe_allow_html=True
+                            )
 
                 with ec2:
                     if has_img:
@@ -745,11 +838,18 @@ with tab4:
                             st.markdown(f'<img src="data:image/jpeg;base64,{b64}" class="img-thumb">',unsafe_allow_html=True)
                             st.caption("Annotated detection image")
                             img_bytes=open(row["image_path"],"rb").read()
-                            st.download_button(f"⬇️ Download Image",img_bytes,
-                                               f"pothole_{row['id']}.jpg","image/jpeg",
-                                               key=f"dl_{row['id']}")
+                            st.download_button(
+                                f"⬇️ Download Image", img_bytes,
+                                f"pothole_{row['id']}.jpg", "image/jpeg",
+                                key=f"dl_{row['id']}"
+                            )
                     else:
-                        st.markdown('<div style="height:120px;display:flex;align-items:center;justify-content:center;color:#1e3a52;font-family:monospace;font-size:.85rem;border:1px dashed #1a2d3d;border-radius:8px;">No image saved</div>',unsafe_allow_html=True)
+                        st.markdown(
+                            '<div style="height:120px;display:flex;align-items:center;justify-content:center;'
+                            'color:#1e3a52;font-family:monospace;font-size:.85rem;border:1px dashed #1a2d3d;'
+                            'border-radius:8px;">No image saved</div>',
+                            unsafe_allow_html=True
+                        )
 
                 bcol1,bcol2=st.columns(2)
                 with bcol1:
@@ -762,7 +862,6 @@ with tab4:
                     if st.button(f"🗑️ Delete #{row['id']}",key=f"del_{row['id']}"):
                         db.delete_detection(row["id"]); st.rerun()
 
-        # Export
         st.markdown("---")
         csv_str=db.export_to_csv()
         if csv_str:
@@ -812,8 +911,12 @@ with tab5:
             st.bar_chart(sync_data.set_index("Status"),color="#4ade80")
 
         st.markdown('<div class="section-title">Full Record Log</div>',unsafe_allow_html=True)
-        st.dataframe(df.drop(columns=["date"],errors="ignore").sort_values("timestamp",ascending=False).reset_index(drop=True),
-                     use_container_width=True,height=300)
+        st.dataframe(
+            df.drop(columns=["date"],errors="ignore")
+              .sort_values("timestamp",ascending=False)
+              .reset_index(drop=True),
+            use_container_width=True, height=300
+        )
         st.download_button("⬇️ Export CSV",db.export_to_csv().encode(),"pothole_data.csv","text/csv")
 
 # ─── Footer ───────────────────────────────────────────────────────────────────
