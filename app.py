@@ -10,7 +10,8 @@ Features:
   ✅ Interactive Folium map
   ✅ Analytics dashboard
 """
-
+import os
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
 import streamlit as st
 import streamlit.components.v1 as components
 import math, os
