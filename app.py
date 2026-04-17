@@ -5,24 +5,12 @@ Features:
   ✅ SQLite database (replaces CSV)
   ✅ Annotated image storage per detection
   ✅ Bounding box records in DB
-  ✅ Supabase cloud sync
+  ✅ Supabase cloud sync (direct sync on save)
   ✅ Live GPS + proximity alerts
   ✅ Interactive Folium map
   ✅ Analytics dashboard
   ✅ FIX: Image upload persisted in session_state (Streamlit Cloud rerun fix)
-
-CHANGES MADE vs original app.py:
-  1. run_detection() — removed redundant cv2.cvtColor(BGR2RGB) on result.plot() output.
-     result.plot() already returns RGB. Converting it again made it BGR, which
-     looked wrong on screen AND caused cv2.imwrite to save incorrect colours.
-     The annotated array is now consistently RGB throughout (display + DB save).
-
-  2. run_detection() — same fix applied to the OBB fallback path (result.plot() branch).
-
-  3. run_detection() — the manual annotation path (cv2.rectangle / cv2.putText) was
-     operating on img_array which may itself have been RGB after the resize. Added a
-     single cv2.cvtColor(RGB2BGR) before drawing and cv2.cvtColor(BGR2RGB) after, so
-     OpenCV drawing functions always get BGR and the returned array is always RGB.
+  ✅ FIX: Save button appears immediately after detection with direct Supabase push
 """
 import os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -121,6 +109,40 @@ html,body,[class*="css"]{font-family:'Syne',sans-serif;}
 .stButton>button:hover{background:#ffb300!important;transform:translateY(-2px)!important;
   box-shadow:0 4px 20px rgba(255,160,0,.3)!important;}
 
+/* ── Save button ── */
+.save-btn-wrapper>div>button {
+  background: linear-gradient(135deg,#ffa000,#ff6f00) !important;
+  font-size: 1.05rem !important;
+  padding: 0.85rem 2rem !important;
+  border-radius: 14px !important;
+  box-shadow: 0 4px 28px rgba(255,160,0,.4) !important;
+  letter-spacing: .4px !important;
+}
+.save-btn-wrapper>div>button:hover {
+  transform: translateY(-3px) !important;
+  box-shadow: 0 8px 36px rgba(255,160,0,.55) !important;
+}
+
+/* ── Supabase status badges ── */
+.supabase-badge {
+  display:inline-flex;align-items:center;gap:.5rem;
+  background:rgba(62,207,142,.1);border:1px solid rgba(62,207,142,.3);
+  border-radius:8px;padding:6px 16px;font-family:'DM Mono',monospace;
+  font-size:.78rem;color:#3ecf8e;margin-top:.5rem;
+}
+.supabase-badge-err {
+  display:inline-flex;align-items:center;gap:.5rem;
+  background:rgba(248,113,113,.1);border:1px solid rgba(248,113,113,.3);
+  border-radius:8px;padding:6px 16px;font-family:'DM Mono',monospace;
+  font-size:.78rem;color:#f87171;margin-top:.5rem;
+}
+.supabase-badge-warn {
+  display:inline-flex;align-items:center;gap:.5rem;
+  background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);
+  border-radius:8px;padding:6px 16px;font-family:'DM Mono',monospace;
+  font-size:.78rem;color:#fbbf24;margin-top:.5rem;
+}
+
 section[data-testid="stSidebar"]{background:#0a0f18!important;border-right:1px solid #1a2d3d!important;}
 [data-testid="stFileUploader"]{background:#0f1923!important;border:2px dashed #1a2d3d!important;border-radius:12px!important;}
 .stTabs [data-baseweb="tab-list"]{background:#0a0f18!important;border-radius:10px;padding:4px;}
@@ -161,29 +183,6 @@ def load_model(path):
     if not os.path.exists(path): return None
     return YOLO(path)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CHANGE 1, 2, 3 — run_detection()
-#
-# Root problem: the original code called cv2.cvtColor(ann, cv2.COLOR_BGR2RGB)
-# on the output of result.plot(). But result.plot() ALREADY returns an RGB
-# array. Converting it a second time flipped it back to BGR-looking colours
-# for display AND caused cv2.imwrite (which expects BGR) to receive a double-
-# flipped array, saving a colour-corrupted image.
-#
-# Fix applied in THREE places inside this function:
-#
-#   [A] OBB fallback branch (result.plot() path):
-#       REMOVED the cv2.cvtColor(BGR2RGB) — plot() is already RGB.
-#
-#   [B] Regular boxes fallback branch (result.plot() path):
-#       REMOVED the cv2.cvtColor(BGR2RGB) — same reason.
-#
-#   [C] Manual drawing path (cv2.rectangle / cv2.putText):
-#       img_array arrives as RGB (from PIL.Image → np.array).
-#       OpenCV drawing functions expect BGR.
-#       Added RGB→BGR before drawing, BGR→RGB after drawing so the
-#       returned array is consistently RGB like the other branches.
-# ─────────────────────────────────────────────────────────────────────────────
 def run_detection(model, img_array, conf_thresh=0.10):
     h, w = img_array.shape[:2]
     if w < 640 or h < 640:
@@ -204,7 +203,6 @@ def run_detection(model, img_array, conf_thresh=0.10):
             confs = result.obb.conf.cpu().numpy()
             xyxy  = result.obb.xyxy.cpu().numpy()
 
-            # CHANGE C: img_array is RGB — convert to BGR for OpenCV drawing
             ann = cv2.cvtColor(img_array.copy(), cv2.COLOR_RGB2BGR)
 
             for i in range(len(polys)):
@@ -222,12 +220,10 @@ def run_detection(model, img_array, conf_thresh=0.10):
                             cv2.FONT_HERSHEY_SIMPLEX, .55, (10,14,23), 1, cv2.LINE_AA)
                 dets.append({"severity":sev, "confidence":conf, "area":area, "bbox":(x1,y1,x2,y2)})
 
-            # CHANGE C: convert back to RGB before returning
             ann = cv2.cvtColor(ann, cv2.COLOR_BGR2RGB)
             return ann, dets
 
         except Exception:
-            # CHANGE A: result.plot() already returns RGB — do NOT convert again
             ann = result.plot()
             return ann, [{"severity":"MEDIUM","confidence":.5,"area":10000,"bbox":(0,0,0,0)}]*len(result.obb)
 
@@ -238,11 +234,9 @@ def run_detection(model, img_array, conf_thresh=0.10):
         bx = result.boxes.xyxy.cpu().numpy()
         bc = result.boxes.conf.cpu().numpy()
     except Exception:
-        # CHANGE B: result.plot() already returns RGB — do NOT convert again
         ann = result.plot()
         return ann, [{"severity":"MEDIUM","confidence":.5,"area":10000,"bbox":(0,0,0,0)}]
 
-    # CHANGE C: img_array is RGB — convert to BGR for OpenCV drawing
     ann = cv2.cvtColor(img_array.copy(), cv2.COLOR_RGB2BGR)
 
     for i in range(len(bx)):
@@ -259,7 +253,6 @@ def run_detection(model, img_array, conf_thresh=0.10):
                     cv2.FONT_HERSHEY_SIMPLEX, .55, (10,14,23), 1, cv2.LINE_AA)
         dets.append({"severity":sev, "confidence":conf, "area":area, "bbox":(x1,y1,x2,y2)})
 
-    # CHANGE C: convert back to RGB before returning
     ann = cv2.cvtColor(ann, cv2.COLOR_BGR2RGB)
     return ann, dets
 
@@ -663,47 +656,95 @@ with tab1:
                         unsafe_allow_html=True
                     )
 
+                # ── SAVE SECTION ──────────────────────────────────────────────
+                st.markdown('<div class="section-title">💾 Save Detection</div>', unsafe_allow_html=True)
+
                 if st.session_state.det_saved:
                     st.markdown(
-                        '<div class="alert-success">✅ <b>Already saved to database!</b> Check the Database tab.</div>',
+                        '<div class="alert-success">✅ <b>Detection saved & synced!</b> '
+                        'Check the Database or Map tab.</div>',
                         unsafe_allow_html=True
                     )
                 else:
-                    st.markdown('<div class="section-title">💾 Save to Database</div>',unsafe_allow_html=True)
-                    st.markdown(f"""<div class="save-preview">
+                    sync_ready = cs.is_configured()
+
+                    # Preview card
+                    sync_label = (
+                        '<span class="supabase-badge">☁️ Supabase connected — will auto-sync</span>'
+                        if sync_ready else
+                        '<span class="supabase-badge-warn">⚠️ Supabase not configured — local save only</span>'
+                    )
+                    st.markdown(f"""
+                    <div class="save-preview">
                       📍 Location   : <b style='color:#ffa000'>{saved_lat:.6f}, {saved_lon:.6f}</b><br>
-                      🚧 Severity   : <b style='color:{SEVERITY_COLORS[worst]}'>{worst}</b> &nbsp;·&nbsp;
-                      🔢 Count: <b>{count}</b> &nbsp;·&nbsp; 🎯 Conf: <b>{avg_conf:.0%}</b><br>
+                      🚧 Severity   : <b style='color:{SEVERITY_COLORS[worst]}'>{worst}</b>
+                         &nbsp;·&nbsp; 🔢 {count} pothole(s)
+                         &nbsp;·&nbsp; 🎯 {avg_conf:.0%} avg confidence<br>
                       🖼️ Image      : <b style='color:#4ade80'>Annotated image will be stored</b><br>
-                      ☁️ Cloud sync : <b style='color:{"#4ade80" if cs.is_configured() else "#f87171"}'>{"Ready" if cs.is_configured() else "Not configured"}</b>
-                    </div>""",unsafe_allow_html=True)
+                      {sync_label}
+                    </div>
+                    """, unsafe_allow_html=True)
 
-                    verified   = st.checkbox("✅ I confirm these results are accurate")
-                    auto_sync  = st.checkbox("☁️ Auto-sync to cloud after saving", value=cs.is_configured())
+                    # ── Big Save + Sync button ────────────────────────────────
+                    btn_label = (
+                        "💾  Save to Database & Sync to Supabase"
+                        if sync_ready else
+                        "💾  Save to Local Database"
+                    )
+                    st.markdown('<div class="save-btn-wrapper">', unsafe_allow_html=True)
+                    save_clicked = st.button(btn_label, use_container_width=True, key="save_detection_btn")
+                    st.markdown('</div>', unsafe_allow_html=True)
 
-                    if verified:
-                        if st.button("💾 Save to SQLite + Store Image", use_container_width=True):
-                            with st.spinner("Saving to database…"):
-                                det_id = db.insert_detection(
-                                    lat=saved_lat,
-                                    lon=saved_lon,
-                                    severity=worst,
-                                    confidence=avg_conf,
-                                    count=count,
-                                    detections_list=detections,
-                                    annotated_img=annotated,
-                                )
-                            st.session_state.det_saved = True
-                            st.success(f"🎉 Saved as Detection #{det_id}! Go to 🗺️ Map View to see the pin.")
+                    if save_clicked:
+                        # ── Step 1: Save to SQLite ────────────────────────────
+                        with st.spinner("💾 Saving to SQLite database…"):
+                            det_id = db.insert_detection(
+                                lat=saved_lat,
+                                lon=saved_lon,
+                                severity=worst,
+                                confidence=avg_conf,
+                                count=count,
+                                detections_list=detections,
+                                annotated_img=annotated,
+                            )
 
-                            if auto_sync and cs.is_configured():
-                                with st.spinner("Syncing to Supabase…"):
-                                    r = cs.sync_all_unsynced(db)
-                                if r["synced"] > 0:
-                                    st.success("☁️ Synced to Supabase!")
-                                elif r["errors"]:
-                                    st.warning(f"Sync issue: {r['errors'][0]}")
-                            st.balloons()
+                        st.session_state.det_saved = True
+                        st.success(f"🎉 Saved locally as Detection #{det_id}!")
+
+                        # ── Step 2: Push directly to Supabase ─────────────────
+                        if sync_ready:
+                            with st.spinner("☁️ Syncing to Supabase…"):
+                                try:
+                                    client = cs.get_client()
+                                    det_row, box_rows = db.load_detection_with_boxes(det_id)
+                                    img_path = det_row.get("image_path")
+                                    ok = cs.sync_detection(client, det_row, box_rows, img_path)
+                                    if ok:
+                                        db.mark_synced([det_id])
+                                        st.markdown(
+                                            '<span class="supabase-badge">'
+                                            '✅ Synced to Supabase successfully!</span>',
+                                            unsafe_allow_html=True
+                                        )
+                                    else:
+                                        st.markdown(
+                                            '<span class="supabase-badge-err">'
+                                            '⚠️ Supabase sync failed — record saved locally. '
+                                            'Use "Sync Now" in the sidebar to retry.</span>',
+                                            unsafe_allow_html=True
+                                        )
+                                except Exception as e:
+                                    st.markdown(
+                                        f'<span class="supabase-badge-err">'
+                                        f'⚠️ Sync error: {e}</span>',
+                                        unsafe_allow_html=True
+                                    )
+                        else:
+                            st.info("💡 Configure Supabase URL & Key in the sidebar to enable cloud sync.")
+
+                        st.balloons()
+                        st.rerun()
+
         else:
             st.markdown("""<div style='height:380px;display:flex;flex-direction:column;
               align-items:center;justify-content:center;text-align:center;'>
