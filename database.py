@@ -1,6 +1,11 @@
 """
 database.py — SQLite backend for PotholeAI
 Stores: detections, bounding boxes, images (base64), GPS coords
+
+CHANGES MADE:
+  1. save_annotated_image — added os.makedirs() inside function (not just at import)
+  2. save_annotated_image — added cv2.imwrite() success check + file existence check
+  3. insert_detection     — guarded UPDATE with "if img_path:" so broken paths never enter DB
 """
 
 import sqlite3
@@ -29,7 +34,6 @@ def init_db():
     conn = get_conn()
     c = conn.cursor()
 
-    # Main detections table
     c.execute("""
         CREATE TABLE IF NOT EXISTS detections (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,7 +48,6 @@ def init_db():
         )
     """)
 
-    # Bounding boxes table (one row per box, many per detection)
     c.execute("""
         CREATE TABLE IF NOT EXISTS bounding_boxes (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,21 +65,57 @@ def init_db():
     conn.close()
 
 
-def save_annotated_image(detection_id: int, annotated_img: np.ndarray) -> str:
-    """Save annotated image to disk, return relative path."""
-    filename  = f"detection_{detection_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-    filepath  = os.path.join(IMG_FOLDER, filename)
-    bgr_image = cv2.cvtColor(annotated_img, cv2.COLOR_RGB2BGR)
-    cv2.imwrite(filepath, bgr_image, [cv2.IMWRITE_JPEG_QUALITY, 90])
-    return filepath
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANGE 1 + 2: save_annotated_image
+#   - os.makedirs() called inside function so folder always exists at write time
+#   - cv2.imwrite() return value is now checked (returns False silently on failure)
+#   - file existence verified after write
+#   - entire function wrapped in try/except so it never crashes the save flow
+# ─────────────────────────────────────────────────────────────────────────────
+def save_annotated_image(detection_id: int, annotated_img: np.ndarray) -> str | None:
+    """Save annotated image to disk. Returns filepath on success, None on failure."""
+    try:
+        # Always recreate folder — Streamlit Cloud can reset filesystem after import
+        os.makedirs(IMG_FOLDER, exist_ok=True)
+
+        filename = f"detection_{detection_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        filepath = os.path.join(IMG_FOLDER, filename)
+
+        # annotated_img from run_detection() is RGB (OpenCV plot() returns RGB).
+        # cv2.imwrite() requires BGR — convert only if 3-channel.
+        if annotated_img.ndim == 3 and annotated_img.shape[2] == 3:
+            bgr_image = cv2.cvtColor(annotated_img, cv2.COLOR_RGB2BGR)
+        else:
+            bgr_image = annotated_img
+
+        success = cv2.imwrite(filepath, bgr_image, [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+        if not success:
+            print(f"[ERROR] cv2.imwrite returned False — path: {filepath}")
+            return None
+
+        if not os.path.exists(filepath):
+            print(f"[ERROR] File missing after write — path: {filepath}")
+            return None
+
+        return filepath
+
+    except Exception as e:
+        print(f"[ERROR] save_annotated_image failed: {e}")
+        return None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANGE 3: insert_detection
+#   - image_path UPDATE is now inside "if img_path:" guard
+#   - if save fails, detection is still saved (without image), not silently broken
+# ─────────────────────────────────────────────────────────────────────────────
 def insert_detection(lat: float, lon: float, severity: str,
                      confidence: float, count: int,
                      detections_list: list,
                      annotated_img: np.ndarray = None) -> int:
     """
-    Insert a full detection record with all bounding boxes and annotated image.
+    Insert a full detection record with bounding boxes and annotated image.
     Returns the new detection ID.
     """
     conn = get_conn()
@@ -84,7 +123,6 @@ def insert_detection(lat: float, lon: float, severity: str,
 
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Insert main detection row first (no image path yet)
     c.execute("""
         INSERT INTO detections
             (timestamp, latitude, longitude, severity, confidence, pothole_count, image_path, synced)
@@ -93,7 +131,6 @@ def insert_detection(lat: float, lon: float, severity: str,
 
     det_id = c.lastrowid
 
-    # Insert individual bounding boxes
     for idx, box in enumerate(detections_list):
         x1, y1, x2, y2 = box.get("bbox", (0, 0, 0, 0))
         c.execute("""
@@ -105,11 +142,17 @@ def insert_detection(lat: float, lon: float, severity: str,
 
     conn.commit()
 
-    # Save annotated image now that we have the ID
     if annotated_img is not None:
         img_path = save_annotated_image(det_id, annotated_img)
-        c.execute("UPDATE detections SET image_path = ? WHERE id = ?", (img_path, det_id))
-        conn.commit()
+        if img_path:
+            # Only update DB if file was actually written successfully
+            c.execute(
+                "UPDATE detections SET image_path = ? WHERE id = ?",
+                (img_path, det_id)
+            )
+            conn.commit()
+        else:
+            print(f"[WARNING] Detection #{det_id} saved to DB without image.")
 
     conn.close()
     return det_id
@@ -168,7 +211,6 @@ def get_unsynced():
 
 def delete_detection(detection_id: int):
     conn = get_conn()
-    # Fetch image path first so we can delete the file
     row = conn.execute(
         "SELECT image_path FROM detections WHERE id = ?", (detection_id,)
     ).fetchone()
@@ -183,7 +225,7 @@ def delete_detection(detection_id: int):
 def export_to_csv() -> str:
     """Export detections table to CSV string."""
     import io, csv
-    rows   = load_all_detections()
+    rows = load_all_detections()
     if not rows:
         return ""
     output = io.StringIO()

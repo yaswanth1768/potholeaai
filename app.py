@@ -10,6 +10,19 @@ Features:
   ✅ Interactive Folium map
   ✅ Analytics dashboard
   ✅ FIX: Image upload persisted in session_state (Streamlit Cloud rerun fix)
+
+CHANGES MADE vs original app.py:
+  1. run_detection() — removed redundant cv2.cvtColor(BGR2RGB) on result.plot() output.
+     result.plot() already returns RGB. Converting it again made it BGR, which
+     looked wrong on screen AND caused cv2.imwrite to save incorrect colours.
+     The annotated array is now consistently RGB throughout (display + DB save).
+
+  2. run_detection() — same fix applied to the OBB fallback path (result.plot() branch).
+
+  3. run_detection() — the manual annotation path (cv2.rectangle / cv2.putText) was
+     operating on img_array which may itself have been RGB after the resize. Added a
+     single cv2.cvtColor(RGB2BGR) before drawing and cv2.cvtColor(BGR2RGB) after, so
+     OpenCV drawing functions always get BGR and the returned array is always RGB.
 """
 import os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
@@ -148,53 +161,108 @@ def load_model(path):
     if not os.path.exists(path): return None
     return YOLO(path)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANGE 1, 2, 3 — run_detection()
+#
+# Root problem: the original code called cv2.cvtColor(ann, cv2.COLOR_BGR2RGB)
+# on the output of result.plot(). But result.plot() ALREADY returns an RGB
+# array. Converting it a second time flipped it back to BGR-looking colours
+# for display AND caused cv2.imwrite (which expects BGR) to receive a double-
+# flipped array, saving a colour-corrupted image.
+#
+# Fix applied in THREE places inside this function:
+#
+#   [A] OBB fallback branch (result.plot() path):
+#       REMOVED the cv2.cvtColor(BGR2RGB) — plot() is already RGB.
+#
+#   [B] Regular boxes fallback branch (result.plot() path):
+#       REMOVED the cv2.cvtColor(BGR2RGB) — same reason.
+#
+#   [C] Manual drawing path (cv2.rectangle / cv2.putText):
+#       img_array arrives as RGB (from PIL.Image → np.array).
+#       OpenCV drawing functions expect BGR.
+#       Added RGB→BGR before drawing, BGR→RGB after drawing so the
+#       returned array is consistently RGB like the other branches.
+# ─────────────────────────────────────────────────────────────────────────────
 def run_detection(model, img_array, conf_thresh=0.10):
-    h,w=img_array.shape[:2]
-    if w<640 or h<640:
-        scale=max(640/w,640/h)
-        img_array=cv2.resize(img_array,(int(w*scale),int(h*scale)),interpolation=cv2.INTER_LINEAR)
-    results=model.predict(img_array,conf=conf_thresh,imgsz=640,verbose=False)
-    result=results[0]
-    cmap={"LOW":(74,222,128),"MEDIUM":(251,191,36),"HIGH":(248,113,113)}
-    dets=[]
-    is_obb=hasattr(result,"obb") and result.obb is not None and len(result.obb)>0
+    h, w = img_array.shape[:2]
+    if w < 640 or h < 640:
+        scale = max(640/w, 640/h)
+        img_array = cv2.resize(img_array, (int(w*scale), int(h*scale)),
+                               interpolation=cv2.INTER_LINEAR)
+
+    results = model.predict(img_array, conf=conf_thresh, imgsz=640, verbose=False)
+    result  = results[0]
+    cmap    = {"LOW":(74,222,128), "MEDIUM":(251,191,36), "HIGH":(248,113,113)}
+    dets    = []
+
+    is_obb = hasattr(result, "obb") and result.obb is not None and len(result.obb) > 0
+
     if is_obb:
         try:
-            polys=result.obb.xyxyxyxy.cpu().numpy()
-            confs=result.obb.conf.cpu().numpy()
-            xyxy=result.obb.xyxy.cpu().numpy()
-            ann=img_array.copy()
+            polys = result.obb.xyxyxyxy.cpu().numpy()
+            confs = result.obb.conf.cpu().numpy()
+            xyxy  = result.obb.xyxy.cpu().numpy()
+
+            # CHANGE C: img_array is RGB — convert to BGR for OpenCV drawing
+            ann = cv2.cvtColor(img_array.copy(), cv2.COLOR_RGB2BGR)
+
             for i in range(len(polys)):
-                conf=float(confs[i]);x1,y1,x2,y2=map(int,xyxy[i])
-                area=max((x2-x1)*(y2-y1),0);sev=get_severity(area);color=cmap[sev]
-                pts=polys[i].astype(np.int32).reshape((-1,1,2))
-                cv2.polylines(ann,[pts],isClosed=True,color=color,thickness=2)
-                label=f"{sev} {conf:.0%}"
-                (tw,th),_=cv2.getTextSize(label,cv2.FONT_HERSHEY_SIMPLEX,.55,1)
-                cv2.rectangle(ann,(x1,max(y1-th-8,0)),(x1+tw+6,y1),color,-1)
-                cv2.putText(ann,label,(x1+3,max(y1-4,th)),cv2.FONT_HERSHEY_SIMPLEX,.55,(10,14,23),1,cv2.LINE_AA)
-                dets.append({"severity":sev,"confidence":conf,"area":area,"bbox":(x1,y1,x2,y2)})
-            return ann,dets
+                conf = float(confs[i])
+                x1, y1, x2, y2 = map(int, xyxy[i])
+                area = max((x2-x1)*(y2-y1), 0)
+                sev  = get_severity(area)
+                color = cmap[sev]
+                pts  = polys[i].astype(np.int32).reshape((-1, 1, 2))
+                cv2.polylines(ann, [pts], isClosed=True, color=color, thickness=2)
+                label = f"{sev} {conf:.0%}"
+                (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, .55, 1)
+                cv2.rectangle(ann, (x1, max(y1-th-8, 0)), (x1+tw+6, y1), color, -1)
+                cv2.putText(ann, label, (x1+3, max(y1-4, th)),
+                            cv2.FONT_HERSHEY_SIMPLEX, .55, (10,14,23), 1, cv2.LINE_AA)
+                dets.append({"severity":sev, "confidence":conf, "area":area, "bbox":(x1,y1,x2,y2)})
+
+            # CHANGE C: convert back to RGB before returning
+            ann = cv2.cvtColor(ann, cv2.COLOR_BGR2RGB)
+            return ann, dets
+
         except Exception:
-            ann=result.plot();ann=cv2.cvtColor(ann,cv2.COLOR_BGR2RGB)
-            return ann,[{"severity":"MEDIUM","confidence":.5,"area":10000,"bbox":(0,0,0,0)}]*len(result.obb)
-    if result.boxes is None or len(result.boxes)==0: return img_array.copy(),dets
+            # CHANGE A: result.plot() already returns RGB — do NOT convert again
+            ann = result.plot()
+            return ann, [{"severity":"MEDIUM","confidence":.5,"area":10000,"bbox":(0,0,0,0)}]*len(result.obb)
+
+    if result.boxes is None or len(result.boxes) == 0:
+        return img_array.copy(), dets
+
     try:
-        bx=result.boxes.xyxy.cpu().numpy();bc=result.boxes.conf.cpu().numpy()
+        bx = result.boxes.xyxy.cpu().numpy()
+        bc = result.boxes.conf.cpu().numpy()
     except Exception:
-        ann=result.plot();ann=cv2.cvtColor(ann,cv2.COLOR_BGR2RGB)
-        return ann,[{"severity":"MEDIUM","confidence":.5,"area":10000,"bbox":(0,0,0,0)}]
-    ann=img_array.copy()
+        # CHANGE B: result.plot() already returns RGB — do NOT convert again
+        ann = result.plot()
+        return ann, [{"severity":"MEDIUM","confidence":.5,"area":10000,"bbox":(0,0,0,0)}]
+
+    # CHANGE C: img_array is RGB — convert to BGR for OpenCV drawing
+    ann = cv2.cvtColor(img_array.copy(), cv2.COLOR_RGB2BGR)
+
     for i in range(len(bx)):
-        x1,y1,x2,y2=map(int,bx[i]);conf=float(bc[i])
-        area=max((x2-x1)*(y2-y1),0);sev=get_severity(area);color=cmap[sev]
-        cv2.rectangle(ann,(x1,y1),(x2,y2),color,2)
-        label=f"{sev} {conf:.0%}"
-        (tw,th),_=cv2.getTextSize(label,cv2.FONT_HERSHEY_SIMPLEX,.55,1)
-        cv2.rectangle(ann,(x1,max(y1-th-8,0)),(x1+tw+6,y1),color,-1)
-        cv2.putText(ann,label,(x1+3,max(y1-4,th)),cv2.FONT_HERSHEY_SIMPLEX,.55,(10,14,23),1,cv2.LINE_AA)
-        dets.append({"severity":sev,"confidence":conf,"area":area,"bbox":(x1,y1,x2,y2)})
-    return ann,dets
+        x1, y1, x2, y2 = map(int, bx[i])
+        conf = float(bc[i])
+        area = max((x2-x1)*(y2-y1), 0)
+        sev  = get_severity(area)
+        color = cmap[sev]
+        cv2.rectangle(ann, (x1,y1), (x2,y2), color, 2)
+        label = f"{sev} {conf:.0%}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, .55, 1)
+        cv2.rectangle(ann, (x1, max(y1-th-8,0)), (x1+tw+6, y1), color, -1)
+        cv2.putText(ann, label, (x1+3, max(y1-4, th)),
+                    cv2.FONT_HERSHEY_SIMPLEX, .55, (10,14,23), 1, cv2.LINE_AA)
+        dets.append({"severity":sev, "confidence":conf, "area":area, "bbox":(x1,y1,x2,y2)})
+
+    # CHANGE C: convert back to RGB before returning
+    ann = cv2.cvtColor(ann, cv2.COLOR_BGR2RGB)
+    return ann, dets
+
 
 def haversine(lat1,lon1,lat2,lon2):
     R=6371000;p=math.pi/180
@@ -417,12 +485,6 @@ tab1,tab2,tab3,tab4,tab5 = st.tabs([
     "🔍 Detect & Save","⚠️ Proximity Alert","🗺️ Map View","🗄️ Database","📊 Analytics"
 ])
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SESSION STATE INITIALISATION
-# ── All keys declared here so reruns never lose state ────────────────────────
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Read GPS coordinates from URL query params (set by browser GPS button)
 _qp = st.query_params
 _gps_lat_default = float(_qp.get("gps_lat", 13.0827))
 _gps_lon_default = float(_qp.get("gps_lon", 80.2707))
@@ -436,7 +498,6 @@ for _k, _v in [
     ("det_saved",          False),
     ("det_lat",            _gps_lat_default),
     ("det_lon",            _gps_lon_default),
-    # ── FIX: persist uploaded image across reruns ──
     ("uploaded_img_array", None),
     ("uploaded_pil_img",   None),
 ]:
@@ -458,25 +519,21 @@ with tab1:
             label_visibility="collapsed"
         )
 
-        # ── FIX: store image in session_state as soon as it arrives ──────────
         if uploaded is not None:
             pil_img   = Image.open(uploaded).convert("RGB")
             img_array = np.array(pil_img)
             st.session_state.uploaded_pil_img   = pil_img
             st.session_state.uploaded_img_array = img_array
-            # New file uploaded → reset previous detection results
             st.session_state.det_annotated  = None
             st.session_state.det_detections = None
             st.session_state.det_saved      = False
 
-        # Show preview from session_state (survives button-click reruns)
         if st.session_state.uploaded_pil_img is not None:
             st.image(
                 st.session_state.uploaded_pil_img,
                 caption="Uploaded image",
                 use_container_width=True
             )
-            # Clear image button
             if st.button("🗑️ Clear image", key="clear_img"):
                 st.session_state.uploaded_pil_img   = None
                 st.session_state.uploaded_img_array = None
@@ -525,7 +582,6 @@ with tab1:
                 unsafe_allow_html=True
             )
 
-        # ── FIX: gate on session_state image, not the transient `uploaded` var ──
         if st.session_state.uploaded_img_array is not None:
             if st.button("🚀 Run Detection", use_container_width=True):
                 if model is None:
@@ -554,7 +610,6 @@ with tab1:
         else:
             st.info("👆 Upload a road image to begin.")
 
-    # ── Right column: results ─────────────────────────────────────────────────
     with cr:
         st.markdown('<div class="section-title">🎯 Results</div>',unsafe_allow_html=True)
 
